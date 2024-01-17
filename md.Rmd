@@ -1,0 +1,469 @@
+---
+title: ""
+subtitle: ""
+author: ""
+date: ''
+output:   
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+
+## **Package**
+
+```{r message = FALSE}
+library(tidyr)
+library(readr)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(lubridate)
+library(forecast)
+library(kableExtra)
+library(sass)
+```
+
+## **Function**
+```{r}
+# Return a logical vector when each observation in a vector is greater than the maximum of all observations preceding it (na.rm = TRUE)
+# Is used to evaluate Dataset 2 in Data Preparation Section
+# (OpenAI's ChatGPT, personal communication, 20 May 2023)
+check_max_preceding <- function(data) {
+  logical_vector <- logical(length(data))  # Initialize logical vector with all elements as FALSE
+  
+  logical_vector[1] <- TRUE  # The first observation is always considered TRUE
+  
+  for (i in 2:length(data)) {
+    if (is.na(data[i])) {
+      logical_vector[i] <- TRUE  # Impute TRUE for NA values
+    } else if (data[i] > max(data[1:(i-1)], na.rm = TRUE)) {
+      logical_vector[i] <- TRUE
+    } else {
+      logical_vector[i] <- FALSE
+    }
+  }
+  
+  return(logical_vector)
+}
+
+
+# Return an imputed vector with the difference between the current value and the total of its preceding observations.
+# Is used to tidy dataset 2 in Data Preparation Section
+# OpenAI's ChatGPT, personal communication, 20 May 2023
+impute_with_difference <- function(numeric_vector) {
+  for (i in 1:length(numeric_vector)) {
+    if (!is.na(numeric_vector[i])) {
+      diff <- numeric_vector[i] - sum(numeric_vector[1:(i-1)], na.rm = TRUE)
+      if (diff < 0) {
+        numeric_vector[i] <- 0
+      } else {
+        numeric_vector[i] <- diff
+      }
+    }
+  }
+  return(numeric_vector)
+}
+
+
+# Cap function to impute outliers with its closest non-outliers values
+# Is used to impute Outliers in Scanning/Imputing Outliers Section
+cap <- function(x){
+  quantiles <- quantile( x, c(0.05, 0.25, 0.75, 0.95 ) , na.rm = TRUE)
+  x[ x < quantiles[2] - 1.5 * IQR(x, na.rm = TRUE) ] <- quantiles[1]
+  x[ x > quantiles[3] + 1.5 * IQR(x, na.rm = TRUE) ] <- quantiles[4]
+  x
+}
+```
+## **dataURL**
+
+```{r message = FALSE}
+vaccination_data_URL <- "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/country_data/United%20States.csv"
+
+cases_n_deaths_URL <- "https://raw.githubusercontent.com/nytimes/covid-19-data/master/us.csv"
+```
+
+> `vaccination_data_URL` and `cases_n_deaths_URL` are **Dataset 1** and **Dataset 2** respectively.
+
+## **Executive summary**
+Purpose of this report is to show data preparation process for further study on effect of being Fully Vaccinated on Covid-19 Incidents and Fatality due to COVID 19 in the US. 
+
+There are 2 datasets merged, one was on Daily US's Vaccination Campaign statistics [Dataset 1] while the other is US's Daily records of Covid-19's Incidents and Fatality [Dataset 2]. The merge point is date of observations.
+
+The process is demonstrated as:
+
+- **Data Preparation**: subset Dataset 1 and tidy Dataset 2. While the subsetting process for Dataset 1 was straight-forward. Dataset 2 was untidy in terms of logic, which asks for data manipulation. Basically, Dataset 2 presents accumulated data on Incidents and Fatality across each instance. The tidying process requires imputing value of one instance with the difference between it and its preceding instance.
+
+- **Data Understading**: Now that the two datasets is joined. Expectation on variables and their data types is put down first. Conversion is the following part to show how the dataset is conversed to meet the expectations.
+
+- **Scanning/Imputing for Missing Values/Inconsistent Data/obvious Errors**: Number of missing values for the whole dataset and number of negative values for numerical variables are raised. Decision to removing/imputing these values is based on these values' counts.
+
+- **Scanning/Imputing for Outliers**: Numerical variables in this dataset appears to be abnormal-distributed. Hence, outlier detecting and imputing methods to perform are of non-parametric approach.
+
+- **Transforming**: Several mathematical transformation methods have been attempted in this part on one numerical variable only. The purpose is to reduce its skewness. 
+
+## **Data Preparation**
+
+### **Dataset 1**
+
+Dataset 1 is read directly from online `csv` raw format using `readr::read_csv` via `vaccination_data_URL`. Its Dimension is 878*8
+
+```{r message=FALSE}
+vaccination_data <- read_csv(vaccination_data_URL) %>% rename_all(tolower)
+```
+
+
+- A sample subsetted from Dataset 1 is provided below
+```{r prompt=TRUE, echo=FALSE}
+head(vaccination_data) %>% kable() %>% 
+  kable_styling(latex_options="scale_down")
+```
+
+
+
+#### Overview on Dataset 1
+
+Dataset 1 is *Statistics of US Covid-19 Vaccination* hosted on [GitHub Covid-19 Data repository](https://github.com/owid/covid-19-data/blob/master/public/data/vaccinations/country_data/United%20States.csv) 
+
+Variables:
+
+- `location` : The location name - United States. Since both datasets is on COVID-19 of US --> DROP
+
+- `date`: Observation period starts at 2020-12-13 and ends at 2023-05-09 with 1-One day interval. This variable is crucial for our analysis --> KEEP
+
+- `vaccine`:  Vaccine types used in vaccination campaign. Out of scope for this analysis --> DROP
+
+- `source_url`: Website where the data for this dataset was gathered from. Not necessary to include --> DROP
+
+- `total_vaccinations`: Number of vaccine shots delivered on the date instance. Out of scope for this analysis --> DROP 
+
+- `people_vaccinated`: Number of people received vaccination shot on the date instance. Not necessary to include --> DROP
+
+- `people_fully_vaccinated`: Number of people who are fully vaccinated. This is key value of our our analysis  -->KEEP
+
+- `total_booster`: Number of booster shots delivered on the date instance. Out of scope for this analysis --> DROP 
+
+#### Subsetting Dataset 1
+
+Subsetting is done with `dplyr::select`. This is a dataset of 878 observations and 2 variables, 6 first observation along with each variable's data type is shown below by `head`. This subset is already TIDY.
+
+```{r prompt=TRUE}
+vaccination <- vaccination_data %>% select(date, people_fully_vaccinated)
+```
+
+```{r prompt=TRUE, echo=FALSE}
+dim(vaccination)
+head(vaccination)
+```
+### **Dataset 2**
+
+Dataset 2 is read directly from online csv.raw format using `readr::read_csv` via `cases_n_deaths_URL`. Is dimension is 1158*3
+
+```{r message=FALSE}
+cases_deaths <- read_csv(cases_n_deaths_URL) %>% rename_all(tolower)
+```
+
+- A sample is also provided below
+```{r prompt=TRUE, echo=FALSE}
+head(cases_deaths)
+```
+
+
+#### Overview on Dataset 2
+
+Dataset 2 is *Records of US Covid-19 Incidents and Fatality* hosted on [GitHub NYTimes Covid-19 Data repository](https://github.com/nytimes/covid-19-data/blob/master/us.csv) 
+
+Variable Assessment
+
+- `date`: Observation period starts at 2020-12-13 and ends at 2023-05-09 with 1-One day interval
+- `cases`: Accumulative data on cases till the recorded date --> This is untidy
+- `deaths`: Accumulative data on deaths till the recorded date --> This is untidy
+
+#### Tidy Dataset 2
+
+This dataset is UNTIDY. It violates the rule such that each observation has it own row. More specifically, the data shows accumulative sums of people who either caught, or died from coronavirus till the recorded date, rather than showing new cases or new deaths occurred of the date instance.
+
+The strategy to tidy this dataset is to impute an observation with the difference between it and its precedence.
+
+First we will check if there is any observation that does not appear to be accumulative: (being smaller than its preceding observations). In such case, the difference is set to be Zero. Also, all NA values are untouched. It is important that we do not remove those NAs values at such early stage.
+
+- Invalid observation `deaths` variable is checked with defined `check_max_preceding()`. The number of invalid observations is below.
+```{r prompt=TRUE}
+false_deaths <- cases_deaths$deaths %>% check_max_preceding() %>% {which(!.)}
+```
+```{r prompt=TRUE, echo=FALSE}
+length(false_deaths)
+```
+
+- Invalid observations in `cases` variable is checked with defined `check_max_preceding()`. Number of invalid observations is checked with `length()` below.
+```{r prompt=TRUE}
+false_cases <- cases_deaths$cases %>% check_max_preceding() %>% {which(!.)}
+```
+```{r prompt=TRUE, echo=FALSE}
+length(false_cases)
+```
+
+- Dataset 2 `cases_deaths` is tidied into `cleaned_cases_deaths` with defined function `impute_with_difference()`
+```{r prompt=TRUE}
+cleaned_cases_deaths <- cases_deaths %>% 
+  mutate(deaths = impute_with_difference(deaths),
+         cases = impute_with_difference(cases)) 
+```
+
+- Brief comparison between original and cleaned `cases_deaths` are shown below
+```{r prompt=TRUE}
+summary(cases_deaths)
+summary(cleaned_cases_deaths)
+
+
+```
+### JOIN 
+
+After subsetting dataset 1 and tidying dataset 2, we join them by "date" variable . LEFT JOIN `cleaned_cases_deaths` to `vaccination` is chosen since we want to consider the effect of being fully-vaccinated on incidences and fatality' statistics, hence, all observations on `vaccination` should be preserved. 
+
+
+```{r prompt=TRUE}
+temp_join <- vaccination %>% left_join(cleaned_cases_deaths, by = 'date')
+```
+
+- Dimension and Data types for each variable is below:
+```{r prompt=TRUE, echo=FALSE}
+str(temp_join)
+```
+
+
+## **Data Understading**
+
+### Data description
+
+The after-conversion dataset should contain contain 5 variables, detailed as follow: 
+
+- **date** `[date]`: Recorded date of each observation
+
+- **people_fully_vaccinated** [`numeric`]: Number of people who are fully vaccinated
+
+- **month**: [`ordered factor`]: Month of of observation. This a mutated variable from `date` and serves as a parameter to detect outliers in `cases`
+
+- **cases** [`numeric`]: Number of people who are tested positive for corona virus on the recorded date
+
+- **deaths** [`numeric`]: Number of people who died due to covid-19 on the recorded date
+
+### Imputing, conversion and rearrange
+
+Indeed, the conversion process is below:
+
+```{r prompt=TRUE}
+dataset <- temp_join %>% 
+  mutate(month = month(date, label = TRUE)) %>% # Mutating and conversion 
+  select(date, month, people_fully_vaccinated, cases, deaths) # Rearrange
+```
+
+
+The official dataset has 5 variables with 878 observations, the structure is checked below (using `str()`)
+```{r prompt=TRUE, echo=FALSE}
+str(dataset) 
+```
+### Subseting Numerical Variables
+
+By subsetting 3 numerical variables in `dataset` (`people_fully_vaccinated`, `cases`, `deaths`), it is easier for us to wrangle data.
+
+```{r prompt=TRUE}
+num_vars <- dataset %>% select(people_fully_vaccinated, cases, deaths)
+```
+
+The statistic is provided with `summary()`
+
+```{r prompt=TRUE, echo=FALSE}
+summary(num_vars)
+```
+## Scanning/Imputing for Missing Values/Inconsistent Data/Obvious Errors
+
+### Scanning 
+
+- Number of missing values in the dataset is provided with `colSums()`
+```{r prompt=TRUE}
+colSums(is.na(dataset))
+```
+- The numerical variables in the dataset is checked if they contain negative values and it seems that we have no inconsistent data. 
+
+```{r warning=FALSE}
+num_vars %>%
+  filter(people_fully_vaccinated < 0 | cases < 0 | deaths < 0) %>%
+  summarize(
+    people_fully_vaccinated = any(people_fully_vaccinated < 0),
+    cases = any(cases < 0),
+    deaths = any(deaths < 0)
+  ) %>%
+  tibble::as.tibble()
+```
+  
+
+### Removing/Imputing
+
+Amount of NAs roughly equals to as small as 5 % of observations (47 NAs for `cases`, 52 NAs for `deaths` out of 878 total observations). These NAs will be removed
+
+We also have a dataframe free of inconsistent data and NA values only appear in Numerical variables. Hence, these NA values will be removed from both the dataset `dataset` and the numerical subset `num_vars`. 
+
+```{r}
+dataset <- na.omit(dataset)
+num_vars <- na.omit(num_vars)
+```
+
+- New dimension is of `dataset` is 826*5
+```{r prompt=TRUE, echo=FALSE}
+dim(dataset)
+```
+
+
+- New statistics on `num_vars` is also provided using `summary()`.
+```{r prompt=TRUE, echo=FALSE}
+
+summary(num_vars)
+```
+
+## Scanning/Imputing for Outliers
+
+### Distribution of numerical variable
+Distribution of numerical variables is assessed by assessing their histograms. By looking at these, we can tell that data on each of the three numerical variables (`people_fully_vaccinated`, `cases`, `deaths`) does not distribute normally.
+
+
+```{r echo=FALSE}
+par(mfrow = c(2, 2)) # Hide code
+
+hist(num_vars$people_fully_vaccinated, 
+     main = "Histogram of Number of People \n Fully Vaccinate",
+     xlab = "People Fully Vaccinated", ylab = "Frequency", 
+     breaks = 30)
+hist(num_vars$cases, 
+     main = "Histogram of Cases",
+     xlab = "Cases", ylab = "Frequency", 
+     breaks = 30)
+hist(num_vars$deaths, 
+     main = "Histogram of Convid-19 Fatality",
+     xlab = "Fatality", ylab = "Frequency",
+     breaks = 30)
+par(mfrow = c(1, 1)) # Hide code
+```
+
+
+
+### Scanning
+
+#### Univariate outliers
+Outliers are detected using using Turkey Method powered by `boxplot()`since it is a non-parametric method and is recommended for abnormal-distributed data.
+
+```{r prompt=TRUE}
+par(mfrow = c(2, 2))
+
+boxplot_fully_vaccinated <-
+  boxplot(num_vars$people_fully_vaccinated, 
+     main = "Boxplot of People Fully Vaccinate",
+     ylab="People Fully Vacinated")
+
+boxplot_cases <- 
+  boxplot(num_vars$cases, 
+     main = "Histogram of Cases",
+     ylab = "Cases")
+
+
+boxplot_deaths <- 
+  boxplot(num_vars$deaths, 
+     main = "Histogram of Convid-19 Fatality",
+     ylab = "Fatality")
+
+par(mfrow = c(1, 1))
+```
+
+
+Index of outliers for each variable is stored in `boxplot_fully_vaccinated$out`, `boxplot_cases$out`,`boxplot_deaths$out` respectively, the total number of outliers for each variable is concluded below:
+
+```{r prompt=TRUE, echo=FALSE}
+cbind(peopel_fully_vaccinated = length(boxplot_fully_vaccinated$out), 
+      cases = length(boxplot_cases$out), 
+      deaths = length(boxplot_deaths$out)) # Hide code in $out
+
+```
+
+#### Biovariate Outliers
+
+Covid-19 demonstrates same mechanisms with Influenza in terms of spreading. More, Influenza cases tends to peak from September to April next year (CDC 2022). Hence, by boxplotting Covid-19 `cases` throughout 12 months, outliers are seen to mostly appear in months where Influenza's incidents normally peak at .
+
+```{r echo=FALSE}
+boxplot_cases_months <- boxplot(dataset$cases ~ dataset$month, 
+                                main="Cases By Month", 
+                                ylab = "Cases", 
+                                xlab = "Month") # Hide code
+```
+
+### Imputing/Removing Outliers
+
+While assessing outliers for each numerical variable, 
+
+Bivariate assessment on outliers of `cases` shows that these outliers also appear in Influenza-season. Hence, not removing/imputing those outliers is a better idea for fraud detection purposes.
+
+Outliers in `deaths` and `people_fully_vaccinated` can be imputed with defined-above `cap()` function. This capping method is a non-parametric approach, which is more appropriate while working with not-normally-distributed data. 
+```{r}
+vaccinated_cases_cap <- num_vars %>% # Capping
+  select(people_fully_vaccinated, deaths) %>% 
+  sapply(FUN = cap) %>% as.data.frame()
+
+cleaned_num_vars <- num_vars %>% # Mutating into the dataset
+  mutate(
+  people_fully_vaccinated = vaccinated_cases_cap$people_fully_vaccinated,
+  deaths = vaccinated_cases_cap$deaths)
+```
+
+Statistics of post clean process is shown below:
+```{r}
+summary(cleaned_num_vars)
+```
+## **Transformation**
+
+In the previous step, outliers in `cases` stays untouched. In this step, the variable is chosen to to perform transformation to decrease skewness and/or convert its distribution into a normal one.
+
+To do such things, a series of mathematical transformation are chosen as they are commonly used to achieve the mentioned point. 
+
+As we do not have strictly positive data, these following transformations are shortlisted:
+```{r}
+# Square 
+sqr_cases <- cleaned_num_vars$cases^2
+
+# Cube 
+cube_cases <- cleaned_num_vars$cases^3
+
+# sqrt 
+sqrt_cases <- sqrt(cleaned_num_vars$cases)
+
+# cuberoot 
+cubrt_cases <- cleaned_num_vars$cases^(1/3)
+
+```
+```{r echo=FALSE}
+par(mfrow = c(2, 2)) # Hide code
+hist(sqr_cases, main = "Histogram of \n Square-Transformed Cases", breaks = 30)
+hist(cube_cases, main = "Histogram of \n Cube-Transformed Cases", breaks = 30)
+hist(cubrt_cases, main = "Histogram of \n Cube Root Transformation Cases", breaks = 30)
+hist(sqrt_cases, main = "Histogram of \n Square Root Transformation Cases", breaks = 30)
+par(mfrow = c(1, 1))
+```
+
+
+From the graphics, the more powerful transformations are cub-root and square-root as their histograms are more spread out. However, if the final aim is a normal dataset, more transformations can be performed.
+
+<br> <br>
+
+## **Reference**
+ CDC (Center for Disease Control and Prevention)(2022), *Flu Season* [data set], CDC.gov, accessed 17 May 2023. <span>https://www.cdc.gov/flu/about/season/index.html<br> <br>
+ 
+
+ Github (2023), *covid-19-data* [data set], Github, accessed 17 March 2023. <span> https://github.com/owid/covid-19-data/blob/master/public/data/vaccinations/country_data/United%20States.csv
+<span>
+<br> <br> 
+
+
+
+
+
+
+
